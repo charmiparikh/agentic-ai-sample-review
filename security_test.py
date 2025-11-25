@@ -1,7 +1,7 @@
 import os
-import requests
 
-def get_data(user_id):
-    response = requests.get("http://example.com/api/" + user_id)
-    pwd = 'admin@123'
-    return response.json()
+def get_password():
+    pwd = os.environ.get('ADMIN_PASSWORD')
+    if pwd is None:
+        raise ValueError("ADMIN_PASSWORD environment variable not set")
+    return pwd
