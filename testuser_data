@@ -9,58 +9,74 @@ Use this to test code scanning, agents, linting, or MCP server logs.
 
 import time
 import json
+import os
+import logging
+from datetime import datetime
+
+# Setup basic logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(message)s'
+)
 
 # -------------------------------
-# ❌ COMPLIANCE ISSUES
+# ✅ COMPLIANCE FIXES
 # -------------------------------
 
-# C1: PII stored in plain logs (Non-compliant)
+# C1: Never log sensitive PII such as email or SSN. Use redaction or avoid logging these fields entirely.
 def log_user_details(user_email, user_ssn):
-    print(f"[DEBUG] User email: {user_email}, SSN: {user_ssn}")  # <-- PII exposed
+    # Do not log PII directly. If needed, log only that an action occurred.
+    logging.info("[DEBUG] User details accessed.")  # No PII exposed
 
-
-# C2: No audit trail for sensitive operations (Non-compliant)
-def delete_user_account(user_id):
-    # Critical action without audit logging
-    print(f"Deleting user {user_id}...")  # Missing audit event
+# C2: Add audit logging to record sensitive operations, including user ID and timestamp.
+def delete_user_account(user_id, actor="system"):
+    # Implement authentication and authorization checks before allowing sensitive operations.
+    # For demo, assume checks are done.
+    timestamp = datetime.utcnow().isoformat()
+    audit_event = {
+        "event": "delete_user_account",
+        "user_id": user_id,
+        "actor": actor,
+        "timestamp": timestamp
+    }
+    logging.info(f"AUDIT: {json.dumps(audit_event)}")
+    print(f"Deleting user {user_id}...")
     return True
 
-
 # -------------------------------
-# ❌ SECURITY ISSUES
+# ✅ SECURITY FIXES
 # -------------------------------
 
-# S1: Hardcoded secret (Bad practice)
-API_KEY = "123456-SECRET-KEY-HARDCODED"   # <-- should be environment variable
+# S1: Use secret managers instead of hardcoding API keys.
+# Store secrets in environment variables or a secure vault, and load them at runtime.
+API_KEY = os.environ.get("API_KEY")  # <-- loaded securely from environment
 
-
-# S2: SQL injection (unsafe string concatenation)
-def get_user_by_email(email):
-    query = f"SELECT * FROM users WHERE email = '{email}'"  # <-- vulnerable
-    print("Executing query:", query)
+# S2: Use parameterized queries with ? or %s placeholders. Never use string formatting for SQL queries.
+def get_user_by_email(email, db_conn=None):
+    # For demonstration, db_conn is a dummy argument.
+    # In real code, use a DB-API compatible connection and cursor.
+    query = "SELECT * FROM users WHERE email = %s"
+    params = (email,)
+    # Do not print internal queries or sensitive details.
+    logging.info("Executing parameterized query for user lookup.")
+    # Dummy return for demonstration
     return {"dummy": True}
 
-
 # -------------------------------
-# ❌ PERFORMANCE ISSUES
+# ✅ PERFORMANCE FIXES
 # -------------------------------
 
-# P1: Unnecessary sleep causing performance slowdown
+# P1: Remove artificial delays unless strictly required for rate limiting or throttling.
 def process_slow_task():
-    print("Starting slow task...")
-    time.sleep(5)  # <-- artificial delay
-    print("Slow task completed")
+    print("Starting task...")
+    # Removed unnecessary sleep
+    print("Task completed")
 
-
-# P2: Inefficient loop (O(n³) nested loops)
+# P2: Optimize algorithm to reduce time complexity. Use mathematical formula if possible.
 def calculate_heavy(n):
-    total = 0
-    for i in range(n):
-        for j in range(n):
-            for k in range(n):  # <-- extremely slow for large n
-                total += 1
+    # Replace triple nested loop with direct calculation
+    total = n * n * n
     return total
-
 
 # -------------------------------
 # DEMO Runner
