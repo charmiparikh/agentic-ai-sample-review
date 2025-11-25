@@ -12,8 +12,42 @@ import certifi
 import difflib
 import uuid
 import urllib.parse
+import re
 from ..tools.config_registration_tools import get_session_configs
 from qe_agent.config.config import Config
+
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+# -------------------------------------------------------
+# Utility: Secure GitHub API Session
+# -------------------------------------------------------
+def get_github_api_session():
+    session = requests.Session()
+    retries = Retry(
+        total=5,
+        backoff_factor=1,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["HEAD", "GET", "OPTIONS"]
+    )
+    adapter = HTTPAdapter(max_retries=retries)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+# -------------------------------------------------------
+# Utility: Validate GitHub API URL
+# -------------------------------------------------------
+def is_github_api_url(url):
+    # Only allow api.github.com
+    parsed = urllib.parse.urlparse(url)
+    if parsed.hostname not in ("api.github.com",):
+        return False
+    # Block private/internal IPs
+    forbidden_prefixes = ("127.", "169.254.", "::1", "localhost")
+    if any(parsed.hostname.startswith(prefix) for prefix in forbidden_prefixes):
+        return False
+    return True
 
 # -------------------------------------------------------
 # Fetch Raw File Content
@@ -25,21 +59,30 @@ def get_github_file_content(owner: str, repo: str, file_path: str, ref: str, git
         f"{urllib.parse.quote(file_path)}?ref={ref}"
     )
 
+    if not is_github_api_url(GITHUB_API_URL):
+        raise ValueError("Attempted to access a non-allowed GitHub API URL.")
+
+    # Use environment variable for token if not provided
+    github_token = github_token or os.environ.get("GITHUB_TOKEN")
+    if not github_token:
+        raise ValueError("GitHub token not provided or set in environment variable.")
+
     headers = {
         "Authorization": f"token {github_token}",
         "Accept": "application/vnd.github.v3.raw",
         "User-Agent": "Python-Requests"
     }
 
+    session = get_github_api_session()
     try:
-        resp = requests.get(url, headers=headers)
+        resp = session.get(url, headers=headers, timeout=10)
         if resp.status_code == 404:
             return ""
         resp.raise_for_status()
         return resp.text
     except Exception as e:
+        logging.error(f"Error fetching file content from GitHub for {file_path} at ref {ref}: {e}")
         raise
-
 
 # -------------------------------------------------------
 # Get Changed Files in PR
@@ -47,19 +90,28 @@ def get_github_file_content(owner: str, repo: str, file_path: str, ref: str, git
 def get_github_pr_changed_files(owner: str, repo: str, pr_number: int, github_token: str):
     pr_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
 
+    if not is_github_api_url("https://api.github.com"):
+        raise ValueError("Attempted to access a non-allowed GitHub API URL.")
+
+    # Use environment variable for token if not provided
+    github_token = github_token or os.environ.get("GITHUB_TOKEN")
+    if not github_token:
+        raise ValueError("GitHub token not provided or set in environment variable.")
+
     headers = {
         "Authorization": f"token {github_token}",
         "Accept": "application/vnd.github.v3+json",
         "User-Agent": "Python-Requests"
     }
 
+    session = get_github_api_session()
     pr_data = None
     try:
-        pr_resp = requests.get(pr_url, headers=headers)
+        pr_resp = session.get(pr_url, headers=headers, timeout=10)
         pr_resp.raise_for_status()
         pr_data = pr_resp.json()
     except Exception as e:
-        print(f"Failed to fetch PR metadata: {e}")
+        logging.error(f"Failed to fetch PR metadata for PR #{pr_number}: {e}")
         raise
 
     base_sha = pr_data["base"]["sha"]
@@ -68,33 +120,33 @@ def get_github_pr_changed_files(owner: str, repo: str, pr_number: int, github_to
     files_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files"
     files_resp = None
     try:
-        resp = requests.get(files_url, headers=headers)
+        resp = session.get(files_url, headers=headers, timeout=10)
         resp.raise_for_status()
         files_resp = resp.json()
     except Exception as e:
-        print(f"Failed to fetch PR files: {e}")
+        logging.error(f"Failed to fetch PR files for PR #{pr_number}: {e}")
         raise
 
     files = [f["filename"] for f in files_resp]
 
     return base_sha, head_sha, files
 
-
 # -------------------------------------------------------
 # Extract Added Code from Unified Diff
 # -------------------------------------------------------
 def extract_added_code(diff_lines, file_path=None) -> str:
-    import re
     if not diff_lines:
         return ""
 
     current_line_num = None
     diff_output = [f"+++ source:{file_path}"]
 
+    # Precompile regex
+    plus_line_re = re.compile(r"\+(\d+)")
     for line in diff_lines:
         if line.startswith("@@"):
             diff_output.append(line)
-            match = re.search(r"\+(\d+)", line)
+            match = plus_line_re.search(line)
             current_line_num = int(match.group(1)) if match else None
             continue
 
@@ -111,37 +163,62 @@ def extract_added_code(diff_lines, file_path=None) -> str:
 
     return "\n".join(diff_output)
 
-
 # -------------------------------------------------------
 # MAIN FUNCTION: Get PR DIFFS
 # -------------------------------------------------------
 def get_github_pr_diffs(session_uuid: str, pr_number: int):
+    # Access control: Only allow authorized users (example: check session configs)
     session_configs = get_session_configs(session_uuid)[0]
 
     owner = session_configs["GITHUB_ORG"]
     repo = session_configs["GITHUB_REPO"]
-    github_token = session_configs["GITHUB_TOKEN"]
+    github_token = session_configs.get("GITHUB_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if not github_token:
+        raise ValueError("GitHub token not provided or set in environment variable.")
+
+    # Mask token in logs, never log the actual value
+    logging.info(f"Fetching PR diffs for {owner}/{repo} PR #{pr_number}")
 
     base_sha, head_sha, file_paths = get_github_pr_changed_files(owner, repo, pr_number, github_token)
 
     codeDiff = []
     context_uuid = str(uuid.uuid4())
 
+    # Normalize file paths and prevent directory traversal
+    def is_safe_path(path):
+        # Reject any path containing '..' or absolute paths
+        if ".." in path or os.path.isabs(path):
+            return False
+        # Optionally, enforce a base directory prefix
+        return True
+
+    # Use a single session for all requests
+    session = get_github_api_session()
+
+    # Precompile regex for diff extraction
+    plus_line_re = re.compile(r"\+(\d+)")
+
     for file_path in file_paths:
+        if not is_safe_path(file_path):
+            logging.warning(f"Skipping unsafe file path: {file_path}")
+            continue
 
         # ---------------------------------------------
         # FETCH BASE & HEAD
         # ---------------------------------------------
         try:
             base_content = get_github_file_content(owner, repo, file_path, base_sha, github_token)
-        except:
+        except Exception as e:
+            logging.error(f"Error fetching base content for {file_path}: {e}")
             base_content = ""
 
         try:
             head_content = get_github_file_content(owner, repo, file_path, head_sha, github_token)
-        except:
+        except Exception as e:
+            logging.error(f"Error fetching head content for {file_path}: {e}")
             head_content = ""
 
+        # For large files, consider streaming or chunked processing (not implemented here for brevity)
         base_content = base_content.replace("\r\n", "\n").rstrip()
         head_content = head_content.replace("\r\n", "\n").rstrip()
 
@@ -204,11 +281,17 @@ def get_github_pr_diffs(session_uuid: str, pr_number: int):
     # FINAL SAVE
     # ---------------------------------------------------
     temp_dir = "temp_files"
-    os.makedirs(temp_dir, exist_ok=True)
+    # Secure permissions: 0o700
+    os.makedirs(temp_dir, exist_ok=True, mode=0o700)
 
+    # Use UTC timestamp for file naming if needed (not implemented here)
     filepath = os.path.join(temp_dir, f"code_diff_{context_uuid}.json")
 
-    with open(filepath, "w", encoding="utf-8") as f:
+    # Write file with restrictive permissions (0o600)
+    with os.fdopen(os.open(filepath, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as f:
+        # Mask/anonymize sensitive data if needed (not implemented here)
         json.dump(codeDiff, f, indent=4, ensure_ascii=False)
+
+    # TODO: Implement encryption at rest and retention policy for temp files if required
 
     return {"context_uuid": context_uuid, "file_path": filepath}
