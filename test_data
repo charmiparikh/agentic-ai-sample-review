@@ -1,0 +1,214 @@
+"""
+GitHub PR Diff Utilities
+This module provides functions to fetch changed files and code diffs for GitHub pull requests,
+similar to Azure DevOps support in code_difference.py.
+"""
+
+import os
+import json
+import requests
+import logging
+import certifi
+import difflib
+import uuid
+import urllib.parse
+from ..tools.config_registration_tools import get_session_configs
+from qe_agent.config.config import Config
+
+# -------------------------------------------------------
+# Fetch Raw File Content
+# -------------------------------------------------------
+def get_github_file_content(owner: str, repo: str, file_path: str, ref: str, github_token: str) -> str:
+    GITHUB_API_URL = "https://api.github.com"
+    url = (
+        f"{GITHUB_API_URL}/repos/{owner}/{repo}/contents/"
+        f"{urllib.parse.quote(file_path)}?ref={ref}"
+    )
+
+    headers = {
+        "Authorization": f"token {github_token}",
+        "Accept": "application/vnd.github.v3.raw",
+        "User-Agent": "Python-Requests"
+    }
+
+    try:
+        resp = requests.get(url, headers=headers)
+        if resp.status_code == 404:
+            return ""
+        resp.raise_for_status()
+        return resp.text
+    except Exception as e:
+        raise
+
+
+# -------------------------------------------------------
+# Get Changed Files in PR
+# -------------------------------------------------------
+def get_github_pr_changed_files(owner: str, repo: str, pr_number: int, github_token: str):
+    pr_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
+
+    headers = {
+        "Authorization": f"token {github_token}",
+        "Accept": "application/vnd.github.v3+json",
+        "User-Agent": "Python-Requests"
+    }
+
+    pr_data = None
+    try:
+        pr_resp = requests.get(pr_url, headers=headers)
+        pr_resp.raise_for_status()
+        pr_data = pr_resp.json()
+    except Exception as e:
+        print(f"Failed to fetch PR metadata: {e}")
+        raise
+
+    base_sha = pr_data["base"]["sha"]
+    head_sha = pr_data["head"]["sha"]
+
+    files_url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/files"
+    files_resp = None
+    try:
+        resp = requests.get(files_url, headers=headers)
+        resp.raise_for_status()
+        files_resp = resp.json()
+    except Exception as e:
+        print(f"Failed to fetch PR files: {e}")
+        raise
+
+    files = [f["filename"] for f in files_resp]
+
+    return base_sha, head_sha, files
+
+
+# -------------------------------------------------------
+# Extract Added Code from Unified Diff
+# -------------------------------------------------------
+def extract_added_code(diff_lines, file_path=None) -> str:
+    import re
+    if not diff_lines:
+        return ""
+
+    current_line_num = None
+    diff_output = [f"+++ source:{file_path}"]
+
+    for line in diff_lines:
+        if line.startswith("@@"):
+            diff_output.append(line)
+            match = re.search(r"\+(\d+)", line)
+            current_line_num = int(match.group(1)) if match else None
+            continue
+
+        if line.startswith('+') and not line.startswith('+++'):   # added lines only
+            if current_line_num is not None:
+                diff_output.append(f"+{current_line_num}: {line[1:]}")
+                current_line_num += 1
+            else:
+                diff_output.append(line)
+
+        elif not line.startswith('-'):  # unchanged line
+            if current_line_num is not None:
+                current_line_num += 1
+
+    return "\n".join(diff_output)
+
+
+# -------------------------------------------------------
+# MAIN FUNCTION: Get PR DIFFS
+# -------------------------------------------------------
+def get_github_pr_diffs(session_uuid: str, pr_number: int):
+    session_configs = get_session_configs(session_uuid)[0]
+
+    owner = session_configs["GITHUB_ORG"]
+    repo = session_configs["GITHUB_REPO"]
+    github_token = session_configs["GITHUB_TOKEN"]
+
+    base_sha, head_sha, file_paths = get_github_pr_changed_files(owner, repo, pr_number, github_token)
+
+    codeDiff = []
+    context_uuid = str(uuid.uuid4())
+
+    for file_path in file_paths:
+
+        # ---------------------------------------------
+        # FETCH BASE & HEAD
+        # ---------------------------------------------
+        try:
+            base_content = get_github_file_content(owner, repo, file_path, base_sha, github_token)
+        except:
+            base_content = ""
+
+        try:
+            head_content = get_github_file_content(owner, repo, file_path, head_sha, github_token)
+        except:
+            head_content = ""
+
+        base_content = base_content.replace("\r\n", "\n").rstrip()
+        head_content = head_content.replace("\r\n", "\n").rstrip()
+
+        # ---------------------------------------------
+        # CASE 1: New File (base empty, head has content)
+        # ---------------------------------------------
+        if not base_content.strip() and head_content.strip():
+            diff_lines = list(difflib.unified_diff(
+                [],
+                head_content.splitlines(),
+                fromfile=f"base/{file_path}",
+                tofile=f"head/{file_path}",
+                lineterm=""
+            ))
+
+            diff_text = extract_added_code(diff_lines, file_path)
+            if not diff_text.strip():
+                diff_text = "[New file detected but no additions found]"
+
+            codeDiff.append({"file": file_path, "diff": diff_text})
+            continue
+
+        # ---------------------------------------------
+        # CASE 2: Deleted File (head empty)
+        # ---------------------------------------------
+        if not head_content.strip() and base_content.strip():
+            diff_lines = list(difflib.unified_diff(
+                base_content.splitlines(),
+                [],
+                fromfile=f"base/{file_path}",
+                tofile=f"head/{file_path}",
+                lineterm=""
+            ))
+
+            diff_text = extract_added_code(diff_lines, file_path)
+            if not diff_text.strip():
+                diff_text = "[Deleted file]"
+
+            codeDiff.append({"file": file_path, "diff": diff_text})
+            continue
+
+        # ---------------------------------------------
+        # CASE 3: Modified File
+        # ---------------------------------------------
+        diff_lines = list(difflib.unified_diff(
+            base_content.splitlines(),
+            head_content.splitlines(),
+            fromfile=f"base/{file_path}",
+            tofile=f"head/{file_path}",
+            lineterm=""
+        ))
+
+        diff_text = extract_added_code(diff_lines, file_path)
+        if not diff_text.strip():
+            diff_text = "[No textual changes]"
+
+        codeDiff.append({"file": file_path, "diff": diff_text})
+
+    # ---------------------------------------------------
+    # FINAL SAVE
+    # ---------------------------------------------------
+    temp_dir = "temp_files"
+    os.makedirs(temp_dir, exist_ok=True)
+
+    filepath = os.path.join(temp_dir, f"code_diff_{context_uuid}.json")
+
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(codeDiff, f, indent=4, ensure_ascii=False)
+
+    return {"context_uuid": context_uuid, "file_path": filepath}
