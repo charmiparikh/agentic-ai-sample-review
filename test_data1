@@ -9,58 +9,95 @@ Use this to test code scanning, agents, linting, or MCP server logs.
 
 import time
 import json
+import os
+import datetime
 
 # -------------------------------
-# ❌ COMPLIANCE ISSUES
+# ✅ COMPLIANCE FIXES
 # -------------------------------
 
-# C1: PII stored in plain logs (Non-compliant)
+# C1: PII stored in plain logs (Fixed: Mask/redact PII before logging)
 def log_user_details(user_email, user_ssn):
-    print(f"[DEBUG] User email: {user_email}, SSN: {user_ssn}")  # <-- PII exposed
+    # Mask email (show only first letter and domain)
+    masked_email = (
+        user_email[0] + "***@" + user_email.split("@")[-1]
+        if "@" in user_email and len(user_email) > 2
+        else "***"
+    )
+    # Mask SSN (show only last 4 digits)
+    masked_ssn = "***-**-" + user_ssn[-4:] if len(user_ssn) >= 4 else "***"
+    print(f"[DEBUG] User email: {masked_email}, SSN: {masked_ssn}")  # PII masked
 
+# C2: No audit trail for sensitive operations (Fixed: Add audit logging, error handling, and authorization check)
+def delete_user_account(user_id, performed_by=None):
+    # Authorization check (dummy, replace with real logic)
+    if performed_by is None or performed_by != "admin":
+        print("Unauthorized attempt to delete user account.")
+        return False
 
-# C2: No audit trail for sensitive operations (Non-compliant)
-def delete_user_account(user_id):
-    # Critical action without audit logging
-    print(f"Deleting user {user_id}...")  # Missing audit event
-    return True
+    # Audit logging
+    audit_event = {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "action": "delete_user_account",
+        "user_id": user_id,
+        "performed_by": performed_by,
+        "status": "initiated"
+    }
+    # In real code, write to secure, immutable audit log
+    print(f"[AUDIT] {json.dumps(audit_event)}")
 
+    try:
+        # Secure deletion routine (dummy, replace with real logic)
+        print(f"Deleting user {user_id}...")
+        # Document data retention/deletion policies as needed
+        audit_event["status"] = "success"
+        print(f"[AUDIT] {json.dumps(audit_event)}")
+        return True
+    except Exception as e:
+        audit_event["status"] = "error"
+        audit_event["error"] = str(e)
+        print(f"[AUDIT] {json.dumps(audit_event)}")
+        return False
 
 # -------------------------------
-# ❌ SECURITY ISSUES
+# ✅ SECURITY FIXES
 # -------------------------------
 
-# S1: Hardcoded secret (Bad practice)
-API_KEY = "123456-SECRET-KEY-HARDCODED"   # <-- should be environment variable
+# S1: Hardcoded secret (Fixed: Load API key from environment variable)
+API_KEY = os.environ.get("API_KEY")  # Secure: not hardcoded
 
-
-# S2: SQL injection (unsafe string concatenation)
+# S2: SQL injection (Fixed: Use parameterized query)
 def get_user_by_email(email):
-    query = f"SELECT * FROM users WHERE email = '{email}'"  # <-- vulnerable
+    # Example using sqlite3 for demonstration
+    import sqlite3
+    conn = sqlite3.connect(":memory:")  # Dummy connection
+    cursor = conn.cursor()
+    # Dummy table creation for demonstration
+    cursor.execute("CREATE TABLE IF NOT EXISTS users (email TEXT)")
+    cursor.execute("INSERT INTO users (email) VALUES (?)", ("test@example.com",))
+    # Use parameterized query to prevent SQL injection
+    query = "SELECT * FROM users WHERE email = ?"
     print("Executing query:", query)
-    return {"dummy": True}
-
+    cursor.execute(query, (email,))
+    result = cursor.fetchall()
+    conn.close()
+    return {"result": result}
 
 # -------------------------------
-# ❌ PERFORMANCE ISSUES
+# ✅ PERFORMANCE FIXES
 # -------------------------------
 
-# P1: Unnecessary sleep causing performance slowdown
+# P1: Unnecessary sleep causing performance slowdown (Fixed: Remove artificial delay)
 def process_slow_task():
     print("Starting slow task...")
-    time.sleep(5)  # <-- artificial delay
+    # Removed time.sleep(5) artificial delay
     print("Slow task completed")
 
-
-# P2: Inefficient loop (O(n³) nested loops)
+# P2: Inefficient loop (O(n³) nested loops) (Fixed: Use direct calculation)
 def calculate_heavy(n):
-    total = 0
-    for i in range(n):
-        for j in range(n):
-            for k in range(n):  # <-- extremely slow for large n
-                total += 1
+    # Direct calculation instead of nested loops
+    total = n * n * n
     return total
-
 
 # -------------------------------
 # DEMO Runner
@@ -68,7 +105,7 @@ def calculate_heavy(n):
 if __name__ == "__main__":
     # Dummy calls
     log_user_details("dummy@example.com", "999-99-9999")
-    delete_user_account("user123")
+    delete_user_account("user123", performed_by="admin")
     get_user_by_email("test@example.com")
     process_slow_task()
     print("Heavy calculation:", calculate_heavy(50))
