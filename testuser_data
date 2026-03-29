@@ -1,0 +1,74 @@
+"""
+Dummy Python file containing intentional issues in:
+1. Compliance (C1, C2)
+2. Security (S1, S2)
+3. Performance (P1, P2)
+
+Use this to test code scanning, agents, linting, or MCP server logs.
+"""
+
+import time
+import json
+
+# -------------------------------
+# ❌ COMPLIANCE ISSUES
+# -------------------------------
+
+# C1: PII stored in plain logs (Non-compliant)
+def log_user_details(user_email, user_ssn):
+    print(f"[DEBUG] User email: {user_email}, SSN: {user_ssn}")  # <-- PII exposed
+
+
+# C2: No audit trail for sensitive operations (Non-compliant)
+def delete_user_account(user_id):
+    # Critical action without audit logging
+    print(f"Deleting user {user_id}...")  # Missing audit event
+    return True
+
+
+# -------------------------------
+# ❌ SECURITY ISSUES
+# -------------------------------
+
+# S1: Hardcoded secret (Bad practice)
+API_KEY = "123456-SECRET-KEY-HARDCODED"   # <-- should be environment variable
+
+
+# S2: SQL injection (unsafe string concatenation)
+def get_user_by_email(email):
+    query = f"SELECT * FROM users WHERE email = '{email}'"  # <-- vulnerable
+    print("Executing query:", query)
+    return {"dummy": True}
+
+
+# -------------------------------
+# ❌ PERFORMANCE ISSUES
+# -------------------------------
+
+# P1: Unnecessary sleep causing performance slowdown
+def process_slow_task():
+    print("Starting slow task...")
+    time.sleep(5)  # <-- artificial delay
+    print("Slow task completed")
+
+
+# P2: Inefficient loop (O(n³) nested loops)
+def calculate_heavy(n):
+    total = 0
+    for i in range(n):
+        for j in range(n):
+            for k in range(n):  # <-- extremely slow for large n
+                total += 1
+    return total
+
+
+# -------------------------------
+# DEMO Runner
+# -------------------------------
+if __name__ == "__main__":
+    # Dummy calls
+    log_user_details("dummy@example.com", "999-99-9999")
+    delete_user_account("user123")
+    get_user_by_email("test@example.com")
+    process_slow_task()
+    print("Heavy calculation:", calculate_heavy(50))
